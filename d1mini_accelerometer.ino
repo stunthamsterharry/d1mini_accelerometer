@@ -11,6 +11,9 @@
  *          so don't expect any modern coding rules being applied 
  */
 
+
+ADC_MODE(ADC_VCC);  // now system_get_vdd33() gives voltage in mV
+                    // that also means, ADC not available for A0 input.... 
 #include <Wire.h>
 #include <Preferences.h>
 #include <ESP8266WiFi.h>
@@ -400,6 +403,8 @@ void parse_command(String com) {
     running = false;
   } else if (c.equalsIgnoreCase("calib1")) {
     calibrate();
+  } else if (c.equalsIgnoreCase("power")) {
+      console->println("voltage: "+String( system_get_vdd33())+"mV");
   } else if (c.equalsIgnoreCase("interval")) {
     uint32_t i = av[0].toInt();
     if (i > 3) {
