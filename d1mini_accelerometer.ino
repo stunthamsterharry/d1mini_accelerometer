@@ -6,6 +6,8 @@
  * D2 = SDA   both pulled up with 10kOhm
  * 3.3V CS + VCC
  * GND GND
+ * optional
+ * D7 ------- 100Ohm -------- red LED -------GND 
  *
  * CAUTION: I tought myself programming with BASIC on 8-Bit Computers
  *          so don't expect any modern coding rules being applied 
@@ -13,14 +15,14 @@
 
 
 ADC_MODE(ADC_VCC);  // now system_get_vdd33() gives voltage in mV
-                    // that also means, ADC not available for A0 input.... 
+                    // that also means, ADC not available for A0 input....
 #include <Wire.h>
 #include <Preferences.h>
 #include <ESP8266WiFi.h>
 
 
 // ***************** these credentials must be the same as defind the Sensorserver
-#define SSID "SensorServer"   
+#define SSID "SensorServer"
 #define PASSWORD "notMyPassword"
 #define PORT ((uint16_t)160169)
 // ***************** credentials end
@@ -29,11 +31,12 @@ WiFiClient client;
 IPAddress server(192, 168, 4, 1);  // ip of the esp8266 WIFI-AP node
 Preferences preferences;
 
-Stream* console;
+Stream* console = 0;
 #define i2c_add (0x53)  // I2C Addresse des ADXL345
 
 const int sclPin = D1;
 const int sdaPin = D2;
+const int powerLowPin = D7;
 bool running = true;
 bool smoothing;
 bool performancedata = false;
@@ -48,6 +51,10 @@ float xs, ys, zs;          // for calibration
                            // Calibration Data
 float gain[3], offset[3];  // a_x = gain*(x_value + offset)
 
+bool atoprint[10];  // wether to print out stuff
+                    // 0:ax 1:ay 3:az 4:ages ....
+
+
 // place to read data from ADXL345
 const float naive_scale = 9.81 / 256.;
 float aa[3];                                                    // raw, uncalibrated values by doing naive scaling
@@ -56,13 +63,13 @@ float bias[3] = { 0, 0, 0 };
 byte value[1006];  // a bit larger, hunting for an stack overflow... yeah fixed it;)
 
 
-#define SMOOTHING_INTERVAL 16                 // 16
+#define SMOOTHING_INTERVAL 16                // 16
 int16_t smootharray[SMOOTHING_INTERVAL][3];  // for averaging out the small shorttimed variations and the jiggling
 uint16_t smoothindex[3] = { 0, 0, 0 };
 
 void preferences_init() {
   preferences.begin("ADXL345", false);
-  // for old calibration - obsolete - remove when the new stuff is tested 
+  // for old calibration - obsolete - remove when the new stuff is tested
   gain[0] = preferences.getFloat("gain x", (9.81 / 256.));
   gain[1] = preferences.getFloat("gain y", (9.81 / 256.));
   gain[2] = preferences.getFloat("gain z", (9.81 / 256.));
@@ -99,6 +106,10 @@ void preferences_init() {
   // runtimeparameters
   smoothing = preferences.getBool("smoothing", true);
   interrupttime = preferences.getULong("Reporting interval", 5000000);
+  atoprint[0] = preferences.getBool("print a0", true);
+  atoprint[1] = preferences.getBool("print a1", true);
+  atoprint[2] = preferences.getBool("print a2", true);
+  atoprint[3] = preferences.getBool("print a3", true);
 
   preferences.end();
 }
@@ -113,7 +124,7 @@ void preferences_store() {
   preferences.putFloat("offset z", offset[2]);
   preferences.putBytes("scale matrix", &scale, sizeof(scale));
   preferences.putBytes("bias", &bias, sizeof(bias));
-Serial.print("Calib result gain values:");
+  Serial.print("Calib result gain values:");
   for (int i = 0; i < 3; i++) {
     Serial.print(scale[i][i], 6);
     Serial.print("  ");
@@ -127,7 +138,21 @@ Serial.print("Calib result gain values:");
 
   preferences.putBool("smoothing", smoothing);
   preferences.putULong("Reporting interval", interrupttime);
+  preferences.putBool("print a0", atoprint[0]);
+  preferences.putBool("print a1", atoprint[1]);
+  preferences.putBool("print a2", atoprint[2]);
+  preferences.putBool("print a3", atoprint[3]);
   preferences.end();
+}
+
+void check_power() {
+  uint16_t power = system_get_vdd33();
+  if (console) console->println("voltage: " + String(power) + "mV");
+  if (power < 3200) {
+    digitalWrite(powerLowPin, HIGH);
+  } else {
+    digitalWrite(powerLowPin, LOW);
+  }
 }
 
 // some zeroing
@@ -141,7 +166,7 @@ void smooth_init() {
 
 float smooth(int16_t val, uint direction) {
   // direction = 0,1,2 for x,y,z
-  if (direction > 2) return -99999999.; // should never happen
+  if (direction > 2) return -99999999.;  // should never happen
   smootharray[smoothindex[direction]][direction] = val;
   if (smoothindex[direction]++ >= SMOOTHING_INTERVAL) smoothindex[direction] = 0;
   //Serial.println(String("smoothing")+direction+" "+val);
@@ -161,7 +186,7 @@ float smooth(int16_t val, uint direction) {
   }
   // remove higest and lowest...
   res = res - min - max;
-  // ....and average over what remains  
+  // ....and average over what remains
   res = res / float(SMOOTHING_INTERVAL - 2.);
 
   return res;
@@ -261,9 +286,10 @@ bool i2c_request_data(int reg = 0x32) {  // 0x32
 
 void setup() {
   Wire.begin(sdaPin, sclPin);
+  pinMode(powerLowPin, OUTPUT);
   Serial.begin(115200);
-  WiFi.mode(WIFI_STA);  // set mode to wifi station
-  WiFi.begin(SSID, PASSWORD); // connect to Wifi-AP
+  WiFi.mode(WIFI_STA);         // set mode to wifi station
+  WiFi.begin(SSID, PASSWORD);  // connect to Wifi-AP
   delay(500);
   Serial.println(" Accelerometer - searching for Sensorserver AP");
   int tries = 0;
@@ -278,7 +304,7 @@ void setup() {
     if (client.connect(server, PORT)) {
       console = &client;
       Serial.println("connected to server ");
-    } else Serial.print("connecting to server ***** FAILED *****"); // and console still points to Serial
+    } else Serial.print("connecting to server ***** FAILED *****");  // and console still points to Serial
   }
   preferences_init();
 
@@ -297,11 +323,11 @@ void setup() {
 void calib_datasampling() {
   for (int i = 0; i < 16; i++) {
     i2c_request_data();
-    xs = naive_scale *smooth(x, 0);
-    ys = naive_scale *smooth(y, 1);
-    zs = naive_scale *smooth(z, 2);
+    xs = naive_scale * smooth(x, 0);
+    ys = naive_scale * smooth(y, 1);
+    zs = naive_scale * smooth(z, 2);
     delay(100);
-    Serial.print(".");
+    console->print(".");
   }
 }
 
@@ -313,43 +339,43 @@ bool calibrate() {  // there's a better way, but still....
   zmax = zs;
   x0 = xs;
   y0 = ys;
-  Serial.println(String("\n ") + x0 + " " + y0 + " " + z0);
-  Serial.println(String(" ") + xmax + " " + ymax + " " + zmax);
-  Serial.println("\n Lay device with yaxis upwards");
+  console->println(String("\n ") + x0 + " " + y0 + " " + z0);
+  console->println(String(" ") + xmax + " " + ymax + " " + zmax);
+  console->println("\n Lay device with yaxis upwards");
   delay(3000);
   calib_datasampling();
   z0 = zs;
   //x0 = xs; better measured in flat state
   ymax = ys;
-  Serial.println(String("\n ") + x0 + " " + y0 + " " + z0);
-  Serial.println(String(" ") + xmax + " " + ymax + " " + zmax);
-  Serial.println("\n Lay device with xaxis upwards");
+  console->println(String("\n ") + x0 + " " + y0 + " " + z0);
+  console->println(String(" ") + xmax + " " + ymax + " " + zmax);
+  console->println("\n Lay device with xaxis upwards");
   delay(3000);
   calib_datasampling();
   z0 = zs;
   xmax = xs;
   //y0 = ys; better measured in flat state
-  Serial.println(String("\n ") + x0 + " " + y0 + " " + z0);
-  Serial.println(String(" ") + xmax + " " + ymax + " " + zmax);
-  Serial.println("\n CHECKING result");
+  console->println(String("\n ") + x0 + " " + y0 + " " + z0);
+  console->println(String(" ") + xmax + " " + ymax + " " + zmax);
+  console->println("\n CHECKING result");
   if (abs(x0) < 2.) bias[0] = x0;
   if (abs(y0) < 2.) bias[1] = y0;
   if (abs(z0) < 2.) bias[2] = z0;
   if (xmax > 7) scale[0][0] = (9.81 / (xmax - x0));
   if (ymax > 7) scale[1][1] = (9.81 / (ymax - y0));
   if (zmax > 7) scale[2][2] = (9.81 / (zmax - z0));
-  Serial.print("Calib result gain values:");
+  console->print("Calib result gain values:");
   for (int i = 0; i < 3; i++) {
-    Serial.print(scale[i][i], 6);
-    Serial.print("  ");
+    console->print(scale[i][i], 6);
+    console->print("  ");
   }
-  Serial.print("\n");
-  Serial.print("Calib result offset values:");
+  console->print("\n");
+  console->print("Calib result offset values:");
   for (int i = 0; i < 3; i++) {
-    Serial.print(bias[i], 6);
-    Serial.print("  ");
+    console->print(bias[i], 6);
+    console->print("  ");
   }
-  Serial.print("\n");
+  console->print("\n");
   return true;
 }
 
@@ -360,18 +386,18 @@ void calc_and_print() {
   String ausgabe;
   if (performancedata) ausgabe += String(data_count) + " loops:" + loop_count + " t:" + cycle_time + " ";
   float a[3];
-  float asquared=0.;
+  float asquared = 0.;
   for (int i = 0; i < 3; i++) {
     a[i] = 0;
     for (int j = 0; j < 3; j++) {
-      a[i] +=  scale[i][j]* (aa[j]-bias[j]);
+      a[i] += scale[i][j] * (aa[j] - bias[j]);
     }
-//    a[i] -= bias[i];
-    asquared+=  a[i]* a[i];
-    ausgabe += String(a[i]) + " ";
+    //    a[i] -= bias[i];
+    asquared += a[i] * a[i];
+    if (atoprint[i]) ausgabe += String(a[i], 5) + " ";
   }
-  ausgabe += String(sqrt(asquared)) + " ";
-// add some other stuff later, eg calculated velocities ...
+  if (atoprint[3]) ausgabe += String(sqrt(asquared), 5) + " ";
+  // add some other stuff later, eg calculated velocities ...
   console->println(ausgabe);
 }
 
@@ -381,8 +407,8 @@ void parse_command(String com) {
   String c, rest, av[9];
   int pos = 0, pos2;
   int ac = 0;
-  com += " "; // makes it easier to find the last arg
-  
+  com += " ";  // makes it easier to find the last arg
+
   pos2 = com.indexOf(" ");
   c = com.substring(pos, pos2);
   while (ac < 9 && pos2 < com.length()) {
@@ -404,7 +430,29 @@ void parse_command(String com) {
   } else if (c.equalsIgnoreCase("calib1")) {
     calibrate();
   } else if (c.equalsIgnoreCase("power")) {
-      console->println("voltage: "+String( system_get_vdd33())+"mV");
+    check_power();
+  } else if (c.equalsIgnoreCase("format")) {
+    for (int i = 0; i < 8; i++) {
+      int s = av[i].toInt();
+      if (s == 1) atoprint[i] = true;
+      if (s == 0) atoprint[i] = false;
+    }
+  } else if (c.equalsIgnoreCase("calibration")) {
+    uint32_t i = av[0].toInt();
+    if (i < 3) {
+      for (int j = 0; j < 3; j++) {
+        float s = av[j + 1].toFloat();
+        scale[i][j] = s;
+      }
+    } else if (i == 4) {
+      for (int j = 0; j < 3; j++) {
+        float s = av[j + 1].toFloat();
+        bias[j] = s;
+      }
+    } else {
+      console->println("Error with arg 1 of" + c + ":" + av[0]);
+    }
+
   } else if (c.equalsIgnoreCase("interval")) {
     uint32_t i = av[0].toInt();
     if (i > 3) {
@@ -419,7 +467,7 @@ void parse_command(String com) {
   } else if (c.equalsIgnoreCase("store")) {
     preferences_store();
   } else {
-    console->println(" unknown command:" + c);
+    console->println(" unknown command:<" + c + ">");
   }
 }
 
